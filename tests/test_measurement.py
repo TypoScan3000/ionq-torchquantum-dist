@@ -117,8 +117,44 @@ def test_postselect_normalization(verbose=False):
         print("postselect normalization test passed!")
 
 
+def test_diff_sampler_backward_distributed(verbose=False):
+    """
+    Regression test: sampler_diff_approx's backward (via torch.linalg.vector_norm)
+    previously raised `NotImplementedError: Operator aten.masked_fill_.Scalar does
+    not have a sharding strategy registered` whenever state_mag was genuinely
+    sharded (world_sz > 1) with shots > 0 and training=True, followed by a real
+    backward() call. No existing test combined all three -- some exercised the
+    differentiable sampler under sharding without calling backward, others called
+    backward under sharding without exercising the differentiable sampler (shots=0
+    bypasses it regardless of the training flag) -- so this gap went unnoticed.
+    Fixed by replacing vector_norm with an equivalent manual sqrt(sum(x**2))
+    computation in sampler_diff_approx, which does have full DTensor coverage.
+    """
+    rank = os.environ["RANK"]
+    nq = 3
+    world_sz = 2
+
+    qdev = tqd.DistributedQuantumDevice(nq, device="cuda", world_sz=world_sz)
+    p = torch.nn.Parameter(torch.Tensor([torch.pi / 3, -torch.pi / 4, torch.pi / 6]))
+    [qdev.ry(wires=[i], params=p[i]) for i in range(nq)]
+    [qdev.cx(wires=[i, (i + 1) % nq]) for i in range(nq)]
+
+    meas = tqd.measure_allZ(qdev, shots=1000, training=True)
+    loss = meas.abs().sum()
+    loss.backward()  # previously raised NotImplementedError here
+
+    assert p.grad is not None, "Expected gradient to be populated"
+    assert torch.isfinite(p.grad).all(), f"Expected finite gradient, got {p.grad}"
+    assert (p.grad != 0).any(), (
+        "Expected a nonzero gradient to flow through the differentiable sampler"
+    )
+    if rank == "0":
+        print("differentiable sampler backward (distributed) test passed!")
+
+
 if __name__ == "__main__":
     test_noiseless_measurement_values(False)
     test_measurement_after_reshard(False)
     test_cuda_rng_seeding(False)
     test_postselect_normalization(False)
+    test_diff_sampler_backward_distributed(False)
