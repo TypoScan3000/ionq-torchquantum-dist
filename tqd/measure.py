@@ -31,9 +31,12 @@ def sampler_diff_approx(
 
     # all-reduce
     reduce_dims = tuple(range(1, p.ndim))
-    u = (p_2 - e_d) / (
-        torch.linalg.vector_norm(p_2 - e_d, dim=reduce_dims, keepdim=True) + 1e-8
-    )
+    diff = p_2 - e_d
+    # torch.linalg.vector_norm's backward dispatches through aten.masked_fill_,
+    # which has no DTensor sharding strategy registered (breaks backward whenever
+    # state_mag is actually sharded, i.e. world_sz > 1) -- compute the equivalent
+    # L2 norm from sum/sqrt instead, which does have full DTensor coverage.
+    u = diff / (torch.sqrt(diff.pow(2).sum(dim=reduce_dims, keepdim=True)) + 1e-8)
     mu = p * shots
     # Householder
     Qz = z - 2 * u * (z * u).sum(reduce_dims, keepdim=True)  # another all-reduce
